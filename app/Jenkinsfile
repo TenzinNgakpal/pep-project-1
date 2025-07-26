@@ -1,0 +1,77 @@
+
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_HUB_USERNAME = 'tenzinngakpal'
+        DOCKER_IMAGE_NAME = "flask-app-devops"
+        EC2_HOST = '13.203.105.242'
+        EC2_USER = 'ubuntu'
+        EC2_SSH_CREDENTIALS_ID = 'jenkins-ssh-id'
+    }
+
+    stages {
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    sh "docker build -t ${DOCKER_HUB_USERNAME}/${DOCKER_IMAGE_NAME}:${env.BUILD_NUMBER} ."
+                    sh "docker tag ${DOCKER_HUB_USERNAME}/${DOCKER_IMAGE_NAME}:${env.BUILD_NUMBER} ${DOCKER_HUB_USERNAME}/${DOCKER_IMAGE_NAME}:latest"
+                }
+            }
+        }
+
+        stage('Run Unit Tests') {
+            steps {
+                script {
+                    sh "docker run --rm -v $(pwd):/app ${DOCKER_HUB_USERNAME}/${DOCKER_IMAGE_NAME}:${env.BUILD_NUMBER} pytest /app/test_app.py"
+                }
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    script {
+                        sh "echo ${DOCKER_PASS} | docker login -u ${DOCKER_USER} --password-stdin"
+                        sh "docker push ${DOCKER_HUB_USERNAME}/${DOCKER_IMAGE_NAME}:${env.BUILD_NUMBER}"
+                        sh "docker push ${DOCKER_HUB_USERNAME}/${DOCKER_IMAGE_NAME}:latest"
+                        sh "docker logout"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to EC2') {
+            steps {
+                withEnv(["EC2_HOST=${EC2_HOST}", "EC2_USER=${EC2_USER}"]) {
+                    sshagent(credentials: ["${EC2_SSH_CREDENTIALS_ID}"]) {
+                        script {
+                            sh """
+                                ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} <<EOF
+                                    echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                                    docker stop ${DOCKER_IMAGE_NAME} || true
+                                    docker rm ${DOCKER_IMAGE_NAME} || true
+                                    docker pull ${DOCKER_HUB_USERNAME}/${DOCKER_IMAGE_NAME}:latest
+                                    docker run -d --name ${DOCKER_IMAGE_NAME} -p 80:5000 ${DOCKER_HUB_USERNAME}/${DOCKER_IMAGE_NAME}:latest
+                                    docker logout
+                                EOF
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline finished for build ${env.BUILD_NUMBER}"
+        }
+        success {
+            echo "Deployment successful!"
+        }
+        failure {
+            echo "Deployment failed!"
+        }
+    }
+}
